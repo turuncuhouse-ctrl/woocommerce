@@ -1,0 +1,321 @@
+/*
+Plugin Name: Toplu Ürün Güncelleme V2
+Description: WooCommerce ürünlerini sayfa yenilemeden toplu veya tekil olarak düzenlemesini sağlar. AJAX desteklidir.
+Version: 2.0
+Author: TB Bilişim Sistemleri
+License: GPLv3 or later
+License URI: https://www.gnu.org/licenses/gpl-3.0.html
+
+Kurulum Talimatı:
+WordPress WooCommerce sisteminde bu kodu temanızın functions.php dosyasına eklemeniz halinde menüde "Ürünler" sekmesinin altında görünür. Alternatif ve en güvenilir yöntem olarak "Code Snippets" eklentisi ile sitenize ekleyebilirsiniz.
+
+Lisans Bildirimi:
+Bu program özgür yazılımdır: Özgür Yazılım Vakfı tarafından yayımlanan GNU Genel Kamu 
+Lisansı'nın sürüm 3 ya da (isteğinize bağlı olarak) daha sonraki sürümlerinin 
+koşulları altında yeniden dağıtabilir ve/veya değiştirebilirsiniz.
+*/
+
+// 1. Admin Menüsü ve Kütüphaneler 
+add_action('admin_menu', 'ozel_hizli_duzenle_menusu');
+function ozel_hizli_duzenle_menusu() {
+    $page = add_submenu_page(
+        'edit.php?post_type=product', 
+        'Toplu Guncelleme V2', 
+        'Toplu Guncelleme V2', 
+        'manage_woocommerce', 
+        'hizli-urun-duzenle', 
+        'hizli_urun_duzenle_sayfasi'
+    );
+    
+    add_action('admin_print_scripts-' . $page, function() {
+        wp_enqueue_media();
+        wp_enqueue_style('select2-css', 'https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/css/select2.min.css');
+        wp_enqueue_script('select2-js', 'https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/select2.min.js', array('jquery'), null, true);
+    });
+}
+
+// 2. Özel Kargo notunu sitede müşteriye gösterme
+add_action('woocommerce_single_product_summary', 'ozel_kargo_notunu_goster', 15);
+function ozel_kargo_notunu_goster() {
+    global $product;
+    $not = $product->get_meta('_ozel_kargo_notu');
+    if (!empty($not)) {
+        echo '<div style="background:#f8f9fa; padding:10px; border-left:4px solid #ff9800; margin-bottom:15px; font-weight:bold; font-size:14px;">📦 '.$not.'</div>';
+    }
+}
+
+// 3. Ana yönetim sayfası ürünler alt sekmesine eklendi
+function hizli_urun_duzenle_sayfasi() {
+    $sayfa = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
+    $limit = isset($_GET['gosterim']) ? intval($_GET['gosterim']) : 50; 
+
+    $args = array('status' => 'publish', 'limit' => $limit, 'page' => $sayfa, 'paginate' => true);
+    $urunler = wc_get_products($args);
+    $kategoriler = get_terms(array('taxonomy' => 'product_cat', 'hide_empty' => false));
+    ?>
+    <div class="wrap">
+        <h1>Toplu Guncelleme V2</h1>
+        
+        <div style="background:#fff; padding:15px; margin: 20px 0; border: 1px solid #ccd0d4; border-radius: 4px; display:flex; gap:30px; flex-wrap:wrap; align-items: flex-end;">
+            <form method="GET" action="" style="margin: 0;">
+                <input type="hidden" name="post_type" value="product">
+                <input type="hidden" name="page" value="hizli-urun-duzenle">
+                <label style="font-weight: bold; display:block; margin-bottom:5px;">Gösterim:</label>
+                <select name="gosterim" onchange="this.form.submit()">
+                    <option value="20" <?php selected($limit, 20); ?>>20 Adet</option>
+                    <option value="50" <?php selected($limit, 50); ?>>50 Adet</option>
+                    <option value="100" <?php selected($limit, 100); ?>>100 Adet</option>
+                </select>
+            </form>
+
+            <div style="border-left: 2px solid #eee; padding-left: 30px;">
+                <label style="font-weight: bold; display:block; margin-bottom:5px;">Toplu Fiyat İşlemi (Bu Sayfa):</label>
+                <select id="toplu_fiyat_tur"><option value="yuzde">% (Yüzde)</option><option value="tl">TL (Tutar)</option></select>
+                <select id="toplu_fiyat_yon"><option value="artir">Artır</option><option value="azalt">Azalt</option></select>
+                <input type="number" id="toplu_fiyat_deger" style="width:80px;" placeholder="Değer">
+                <button type="button" class="button button-primary" id="btn_toplu_fiyat">Uygula</button>
+            </div>
+
+            <div style="border-left: 2px solid #eee; padding-left: 30px;">
+                <label style="font-weight: bold; display:block; margin-bottom:5px;">Toplu Özel Not (Bu Sayfa):</label>
+                <input type="text" id="toplu_not_deger" style="width:200px;" placeholder="Örn: 3 gün içinde kargoda">
+                <button type="button" class="button button-primary" id="btn_toplu_not">Tümüne Yaz</button>
+            </div>
+        </div>
+
+        <table class="wp-list-table widefat fixed striped">
+            <thead>
+                <tr>
+                    <th style="width: 140px;">Görseller</th>
+                    <th style="width: auto;">Ürün Tanımı & Etiket</th>
+                    <th style="width: 150px;">Fiyat & Stok</th>
+                    <th style="width: 280px;">Kategori & Özel Not</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($urunler->products as $urun) : 
+                    $id = $urun->get_id();
+                    $mevcut_kat = $urun->get_category_ids();
+                    $ana_resim = wp_get_attachment_image_url($urun->get_image_id(), 'thumbnail') ?: wc_placeholder_img_src();
+                    $galeri_ids = $urun->get_gallery_image_ids();
+                    $etiketler = wp_get_post_terms($id, 'product_tag', array('fields' => 'names'));
+                    $etiket_metni = !is_wp_error($etiketler) ? implode(', ', $etiketler) : '';
+                    $stok = $urun->get_manage_stock() ? $urun->get_stock_quantity() : '';
+                    $ozel_not = $urun->get_meta('_ozel_kargo_notu');
+                ?>
+                    <tr class="urun-satiri" data-id="<?php echo $id; ?>">
+                        <td style="vertical-align: top;">
+                            <img src="<?php echo esc_url($ana_resim); ?>" class="resim-secici" data-id="<?php echo $id; ?>" style="width:70px; height:70px; object-fit:cover; cursor:pointer; border:1px solid #ddd; border-radius:4px; margin-bottom:5px;" title="Ana Resmi Değiştir">
+                            <div id="galeri-kutusu-<?php echo $id; ?>" style="display:flex; flex-wrap:wrap; gap:2px; margin-bottom:5px;">
+                                <?php foreach($galeri_ids as $g_id): ?>
+                                    <img src="<?php echo wp_get_attachment_image_url($g_id, 'thumbnail'); ?>" style="width:30px; height:30px; object-fit:cover;">
+                                <?php endforeach; ?>
+                            </div>
+                            <button type="button" class="button button-small galeri-secici" data-id="<?php echo $id; ?>">+ Galeri Seç</button>
+                        </td>
+                        
+                        <td style="vertical-align: top;">
+                            <input type="text" class="otomatik-kaydet-input" data-id="<?php echo $id; ?>" data-tur="isim" value="<?php echo esc_attr($urun->get_name()); ?>" style="width: 100%; font-weight:bold; margin-bottom: 5px;" placeholder="Ürün Adı">
+                            <div style="display:flex; gap:5px; margin-bottom:5px;">
+                                <input type="text" class="otomatik-kaydet-input sku-input-<?php echo $id; ?>" data-id="<?php echo $id; ?>" data-tur="sku" value="<?php echo esc_attr($urun->get_sku()); ?>" style="width: 100%; font-size:12px;" placeholder="Stok Kodu (SKU)">
+                                <button type="button" class="button btn-sku-olustur" data-id="<?php echo $id; ?>" title="TB formatında kod üret">Üret</button>
+                            </div>
+                            <input type="text" class="otomatik-kaydet-input" data-id="<?php echo $id; ?>" data-tur="etiket" value="<?php echo esc_attr($etiket_metni); ?>" style="width: 100%; font-size:12px;" placeholder="Etiketler (Virgülle ayırın)">
+                        </td>
+                        
+                        <td style="vertical-align: top;">
+                            <label style="font-size:11px; color:#666;">Fiyat (₺)</label>
+                            <input type="number" step="0.01" class="otomatik-kaydet-input" data-id="<?php echo $id; ?>" data-tur="fiyat" style="width: 100%; font-weight:bold; margin-bottom: 5px;" value="<?php echo $urun->get_regular_price(); ?>">
+                            <label style="font-size:11px; color:#666;">Stok Adedi</label>
+                            <input type="number" step="1" class="otomatik-kaydet-input" data-id="<?php echo $id; ?>" data-tur="stok" style="width: 100%;" value="<?php echo esc_attr($stok); ?>" placeholder="Sınırsız">
+                        </td>
+                        
+                        <td style="vertical-align: top;">
+                            <select class="otomatik-kaydet-input kategori-select" data-id="<?php echo $id; ?>" data-tur="kategori" multiple style="width: 100%; margin-bottom: 5px;">
+                                <?php foreach ($kategoriler as $kat) : ?>
+                                    <option value="<?php echo $kat->term_id; ?>" <?php echo in_array($kat->term_id, $mevcut_kat) ? 'selected' : ''; ?>><?php echo $kat->name; ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <textarea class="otomatik-kaydet-input" data-id="<?php echo $id; ?>" data-tur="not" style="width: 100%; height:45px; font-size:12px; margin-top:5px;" placeholder="Bu ürüne özel not..."><?php echo esc_textarea($ozel_not); ?></textarea>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+
+        <div class="tablenav"><div class="tablenav-pages">
+            <?php 
+            for ($i = 1; $i <= $urunler->max_num_pages; $i++) {
+                $aktif = ($sayfa == $i) ? 'current' : '';
+                echo '<a class="page-numbers '.$aktif.'" style="padding:5px 10px; border:1px solid #ccc; text-decoration:none;" href="?post_type=product&page=hizli-urun-duzenle&gosterim='.$limit.'&paged='.$i.'">'.$i.'</a> ';
+            }
+            ?>
+        </div></div>
+    </div>
+
+    <script type="text/javascript">
+    jQuery(document).ready(function($) {
+        $('.kategori-select').select2({ placeholder: "Kategorileri seçin..." });
+
+        function gosterBildirim(mesaj, renk = '#4caf50') {
+            $('.ozel-toast').remove();
+            var toast = $('<div class="ozel-toast" style="position:fixed; bottom:30px; right:30px; background:'+renk+'; color:#fff; padding:12px 20px; border-radius:4px; box-shadow:0 4px 10px rgba(0,0,0,0.2); z-index:9999;">'+mesaj+'</div>');
+            $('body').append(toast);
+            setTimeout(function() { toast.fadeOut(function(){ $(this).remove(); }); }, 2500);
+        }
+
+        $('.otomatik-kaydet-input').on('change', function() {
+            var el = $(this);
+            $.post(ajaxurl, { action: 'oto_kayit_islem', id: el.data('id'), tur: el.data('tur'), deger: el.val() }, function(res) { 
+                gosterBildirim('✅ ' + res.data); 
+            });
+        });
+
+        $('.btn-sku-olustur').on('click', function(e) {
+            e.preventDefault();
+            var d = new Date();
+            var saat = String(d.getHours()).padStart(2, '0');
+            var dk = String(d.getMinutes()).padStart(2, '0');
+            var gun = String(d.getDate()).padStart(2, '0');
+            var ay = String(d.getMonth() + 1).padStart(2, '0');
+            var yil = String(d.getFullYear()).slice(-2); 
+            var yeni_sku = 'TB' + saat + dk + gun + ay + yil;
+            $('.sku-input-' + $(this).data('id')).val(yeni_sku).trigger('change');
+        });
+
+        // Ana görsel düzenlemesi resim eklememe sorunu giderildi
+        $('.resim-secici').on('click', function(e) {
+            e.preventDefault(); 
+            var img = $(this);
+            var id = img.data('id');
+
+            var custom_uploader = wp.media({
+                title: 'Ana Görsel Seç',
+                button: { text: 'Görseli Kullan' },
+                multiple: false
+            });
+
+            custom_uploader.on('select', function() {
+                var attachment = custom_uploader.state().get('selection').first().toJSON();
+                // Ekranda görseli hemen değiştir
+                var imageUrl = (attachment.sizes && attachment.sizes.thumbnail) ? attachment.sizes.thumbnail.url : attachment.url;
+                img.attr('src', imageUrl);
+                
+                // Arka planda kaydet
+                $.post(ajaxurl, { action:'oto_kayit_islem', id:id, tur:'ana_resim', deger:attachment.id }, function(res){ 
+                    gosterBildirim('✅ ' + res.data); 
+                });
+            });
+
+            custom_uploader.open();
+        });
+
+        // Galeri resimlerini güncelleme sorun giderildi
+        $('.galeri-secici').on('click', function(e) {
+            e.preventDefault(); 
+            var btn = $(this); 
+            var id = btn.data('id');
+
+            var galeri_uploader = wp.media({
+                title: 'Galeri Görselleri (Çoklu Seçim Yapabilirsiniz)',
+                button: { text: 'Galeriye Ekle' },
+                multiple: true
+            });
+
+            galeri_uploader.on('select', function() {
+                var selection = galeri_uploader.state().get('selection');
+                var ids = []; 
+                var html = '';
+                
+                selection.map(function(attachment) {
+                    var att = attachment.toJSON();
+                    ids.push(att.id);
+                    var img_url = (att.sizes && att.sizes.thumbnail) ? att.sizes.thumbnail.url : att.url;
+                    html += '<img src="'+img_url+'" style="width:30px; height:30px; object-fit:cover; margin-right:2px; border-radius:3px;">';
+                });
+                
+                // Ekranda galeri kutusunu hemen güncelle
+                $('#galeri-kutusu-' + id).html(html);
+                
+                // Arka planda kaydet
+                $.post(ajaxurl, { action:'oto_kayit_islem', id:id, tur:'galeri', deger:ids.join(',') }, function(res){ 
+                    gosterBildirim('✅ ' + res.data); 
+                });
+            });
+
+            galeri_uploader.open();
+        });
+
+        function topluIslemGonder(islem_turu, veriler) {
+            var ids = []; $('.urun-satiri').each(function() { ids.push($(this).data('id')); });
+            if(ids.length === 0) return;
+            gosterBildirim('⏳ İşlem yapılıyor...', '#2271b1');
+            veriler.action = 'oto_toplu_islem'; veriler.ids = ids; veriler.islem = islem_turu;
+            $.post(ajaxurl, veriler, function(res) {
+                gosterBildirim('✅ ' + res.data);
+                setTimeout(function(){ location.reload(); }, 1500); 
+            });
+        }
+
+        $('#btn_toplu_fiyat').click(function() {
+            var deger = $('#toplu_fiyat_deger').val();
+            if(!deger) return;
+            if(confirm("Tüm fiyatlar güncellenecek. Emin misiniz?")) {
+                topluIslemGonder('fiyat', { tur: $('#toplu_fiyat_tur').val(), yon: $('#toplu_fiyat_yon').val(), deger: deger });
+            }
+        });
+
+        $('#btn_toplu_not').click(function() {
+            if(confirm("Özel not tüm ürünlere yazılacak. Emin misiniz?")) {
+                topluIslemGonder('not', { metin: $('#toplu_not_deger').val() });
+            }
+        });
+    });
+    </script>
+    <style> .select2-container .select2-selection--multiple { min-height: 40px; } </style>
+    <?php
+}
+
+// 4. arka plan kayıt işlemleri
+add_action('wp_ajax_oto_kayit_islem', 'ajax_oto_kayit_islem');
+function ajax_oto_kayit_islem() {
+    $urun = wc_get_product(intval($_POST['id']));
+    if (!$urun) wp_send_json_error('Hata!');
+    $tur = $_POST['tur']; $deger = $_POST['deger']; $msg = "Güncellendi.";
+
+    if ($tur === 'isim') { $urun->set_name(sanitize_text_field($deger)); $msg = "İsim kaydedildi."; }
+    if ($tur === 'sku') { $urun->set_sku(sanitize_text_field($deger)); $msg = "SKU kaydedildi."; }
+    if ($tur === 'fiyat') { $urun->set_regular_price(sanitize_text_field($deger)); $msg = "Fiyat kaydedildi."; }
+    if ($tur === 'kategori') { $urun->set_category_ids(!empty($deger) ? array_map('intval', $deger) : array()); $msg = "Kategori kaydedildi."; }
+    if ($tur === 'ana_resim') { $urun->set_image_id(intval($deger)); $msg = "Görsel kaydedildi."; }
+    if ($tur === 'galeri') { $urun->set_gallery_image_ids(!empty($deger) ? explode(',', $deger) : array()); $msg = "Galeri kaydedildi."; }
+    if ($tur === 'not') { $urun->update_meta_data('_ozel_kargo_notu', sanitize_textarea_field($deger)); $msg = "Not kaydedildi."; }
+    if ($tur === 'etiket') { wp_set_object_terms($urun->get_id(), array_map('trim', explode(',', $deger)), 'product_tag'); $msg = "Etiket kaydedildi."; }
+    if ($tur === 'stok') { 
+        if($deger === '') { $urun->set_manage_stock(false); } 
+        else { $urun->set_manage_stock(true); $urun->set_stock_quantity(intval($deger)); }
+        $msg = "Stok kaydedildi."; 
+    }
+
+    $urun->save(); wp_send_json_success($msg);
+}
+
+add_action('wp_ajax_oto_toplu_islem', 'ajax_oto_toplu_islem');
+function ajax_oto_toplu_islem() {
+    $ids = isset($_POST['ids']) ? $_POST['ids'] : array();
+    $islem = $_POST['islem'];
+
+    foreach ($ids as $id) {
+        $urun = wc_get_product($id); if(!$urun) continue;
+        if ($islem === 'fiyat') {
+            $mevcut = (float) $urun->get_regular_price();
+            $tur = $_POST['tur']; $yon = $_POST['yon']; $deger = (float) $_POST['deger'];
+            $fark = ($tur === 'yuzde') ? ($mevcut * ($deger / 100)) : $deger;
+            $yeni = ($yon === 'artir') ? ($mevcut + $fark) : ($mevcut - $fark);
+            $urun->set_regular_price(round($yeni, 2));
+        }
+        if ($islem === 'not') { $urun->update_meta_data('_ozel_kargo_notu', sanitize_text_field($_POST['metin'])); }
+        $urun->save();
+    }
+    wp_send_json_success("Tüm işlemler başarıyla tamamlandı!");
+}
