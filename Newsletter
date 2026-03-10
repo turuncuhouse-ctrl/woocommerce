@@ -86,26 +86,30 @@ function na_custom_cache_bypass_cron() {
 }
 
 // =========================================================================
-// BÖLÜM 4: GÖNDERİM MOTORU (ACTION SCHEDULER & BİLDİRİM)
+// BÖLÜM 4: GÖNDERİM MOTORU (GÜVENLİ VE ZIRHLI)
 // =========================================================================
 
-add_action('wp_ajax_na_process_mail_action', 'na_domino_processor');
-function na_domino_processor() {
-    // GÜVENLİK: Sadece yönetici yetkisi olanlar bu işlemi tetikleyebilir!
+// AJAX Üzerinden Tetikleme (Admin Panelinden Butona Basınca)
+add_action('wp_ajax_na_process_mail_action', 'na_safe_ajax_processor');
+function na_safe_ajax_processor() {
+    // 1. YETKİ KONTROLÜ: Sadece yönetici yapabilir
     if ( ! current_user_can( 'manage_options' ) ) {
-        wp_die( 'Bu işlem için yetkiniz yok!' );
+        wp_send_json_error('Yetkisiz erişim!');
     }
 
-    global $wpdb;
-    // ... geri kalan gönderim kodları ...
+    // 2. NONCE KONTROLÜ: İstek gerçekten bizim panelimizden mi geldi?
+    check_ajax_referer('na_newsletter_nonce', 'security');
+
+    // Her şey tamamsa motoru çalıştır
+    na_domino_processor();
+    wp_send_json_success('Motor tetiklendi.');
 }
 
-add_action('na_process_mail_action', 'na_domino_processor');
+// ASIL MOTOR (Hem Cron hem AJAX burayı kullanır)
 function na_domino_processor() {
     global $wpdb;
     $table = $wpdb->prefix . 'na_queue_master';
 
-    // Kuyruktan sıradaki 1 maili al
     $item = $wpdb->get_row("SELECT * FROM $table WHERE status = 'pending' ORDER BY id ASC LIMIT 1");
 
     if ($item) {
@@ -125,15 +129,15 @@ function na_domino_processor() {
             $speed = (int)get_option('na_send_interval', 60);
             as_schedule_single_action( time() + $speed, 'na_process_mail_action', array(), 'na_newsletter_group' );
         } else {
-            // KUYRUK BİTTİĞİNDE YÖNETİCİYE MAİL AT
             $notified = get_option('na_campaign_notified');
             if (!$notified) {
-                wp_mail(get_option('admin_email'), '✅ Kampanya Tamamlandı', 'Sistemdeki toplu mail gönderimi başarıyla tamamlandı. Kuyruk boşaldı.');
+                wp_mail(get_option('admin_email'), '✅ Kampanya Tamamlandı', 'Toplu mail gönderimi tamamlandı.');
                 update_option('na_campaign_notified', 1);
             }
         }
     }
 }
+add_action('na_process_mail_action', 'na_domino_processor');
 
 // =========================================================================
 // BÖLÜM 5: ADMİN EKRANI - GÖNDERİM VE İLERLEME ÇUBUĞU
