@@ -140,31 +140,45 @@ function na_domino_processor() {
 add_action('na_process_mail_action', 'na_domino_processor');
 
 // =========================================================================
-// BÖLÜM 5: ADMİN EKRANI - GÖNDERİM VE İLERLEME ÇUBUĞU
+// BÖLÜM 5: ADMİN EKRANI - GÖNDERİM VE İLERLEME ÇUBUĞU (GÜVENLİ VERSİYON)
 // =========================================================================
 function na_page_sender_master() {
     global $wpdb;
     $table = $wpdb->prefix . 'na_queue_master';
     $subs_table = $wpdb->prefix . 'na_subs_master';
 
+    // 1. TEKİL SİLME İŞLEMİ GÜVENLİĞİ
     if (isset($_GET['remove_queue_id'])) {
+        check_admin_referer('na_remove_item'); // URL Güvenlik Kontrolü
         $wpdb->delete($table, array('id' => intval($_GET['remove_queue_id'])));
         echo '<div class="updated"><p>Mail kuyruktan çıkartıldı.</p></div>';
     }
 
+    // 2. KUYRUK TEMİZLEME GÜVENLİĞİ
     if (isset($_GET['clear_queue'])) {
+        check_admin_referer('na_clear_all'); // URL Güvenlik Kontrolü
         $wpdb->query("TRUNCATE TABLE $table");
         if (function_exists('as_unschedule_all_actions')) { as_unschedule_all_actions('na_process_mail_action'); }
         echo '<div class="updated"><p>🛑 Tüm kuyruk temizlendi.</p></div>';
     }
 
+    // 3. KAMPANYA BAŞLATMA GÜVENLİĞİ
     if (isset($_POST['na_start_campaign'])) {
-        // KRİTİK DÜZELTME: wp_unslash ile WordPress'in bozduğu HTML'i temizliyoruz!
+        // GÜVENLİK ANAHTARI (NONCE) KONTROLÜ
+        if (!isset($_POST['na_campaign_nonce']) || !wp_verify_nonce($_POST['na_campaign_nonce'], 'na_start_action')) {
+            wp_die('Güvenlik doğrulaması başarısız. Lütfen sayfayı yenileyip tekrar deneyin.');
+        }
+
+        // YETKİ KONTROLÜ
+        if (!current_user_can('manage_options')) {
+            wp_die('Bu işlemi yapmaya yetkiniz yok.');
+        }
+
         $subject = sanitize_text_field(wp_unslash($_POST['m_subject']));
         $body = wp_kses_post(wp_unslash($_POST['m_body'])); 
-        $target_list = $_POST['target_list']; 
+        $target_list = sanitize_text_field($_POST['target_list']); 
         
-        // KAMPANYA GEÇMİŞİNİ HAFIZAYA YAZ (SON 5)
+        // Kampanya Geçmişi Kaydı
         $history = get_option('na_campaign_history', array());
         array_unshift($history, array( 
             'time'    => current_time('mysql'),
@@ -174,8 +188,8 @@ function na_page_sender_master() {
         $history = array_slice($history, 0, 5); 
         update_option('na_campaign_history', $history);
 
+        // Kuyruğu hazırla
         $subs = $wpdb->get_results($wpdb->prepare("SELECT email FROM $subs_table WHERE status='active' AND list_type=%s", $target_list));
-
         $wpdb->query("TRUNCATE TABLE $table");
         update_option('na_campaign_notified', 0);
 
@@ -183,17 +197,18 @@ function na_page_sender_master() {
             $wpdb->insert($table, array('target_email' => $s->email, 'subject' => $subject, 'content' => $body, 'status' => 'pending'));
         }
 
+        // İlk domino taşını devir
         if (function_exists('as_next_scheduled_action') && as_next_scheduled_action('na_process_mail_action') === false) {
             as_schedule_single_action( time(), 'na_process_mail_action', array(), 'na_newsletter_group' );
         }
-        echo '<div class="updated"><p>🚀 Kampanya başlatıldı!</p></div>';
+        echo '<div class="updated"><p>🚀 Kampanya güvenli bir şekilde başlatıldı!</p></div>';
     }
 
-    $total_queue = $wpdb->get_var("SELECT COUNT(*) FROM $table");
-    $pending = $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status='pending'");
+    // Veri Hazırlama
+    $total_queue = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table");
+    $pending = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status='pending'");
     $completed = $total_queue - $pending;
     $percent = ($total_queue > 0) ? round(($completed / $total_queue) * 100) : 0;
-    
     $last_sent = $wpdb->get_results("SELECT * FROM $table WHERE status='sent' ORDER BY id DESC LIMIT 5");
     $next_pending = $wpdb->get_results("SELECT * FROM $table WHERE status='pending' ORDER BY id ASC LIMIT 5");
     $campaign_history = get_option('na_campaign_history', array());
@@ -203,6 +218,8 @@ function na_page_sender_master() {
         <div style="display:grid; grid-template-columns: 2fr 1fr; gap:20px;">
             <div style="background:#fff; padding:20px; border:1px solid #ccd0d4; border-radius:5px;">
                 <form method="post">
+                    <?php wp_nonce_field('na_start_action', 'na_campaign_nonce'); ?>
+
                     <p><strong>Gönderilecek Liste:</strong><br>
                         <select name="target_list" style="width:100%; max-width:300px;">
                             <option value="main">Ana Abone Listesi</option>
@@ -210,7 +227,7 @@ function na_page_sender_master() {
                         </select>
                     </p>
                     <p><strong>Mail Konusu:</strong><br><input type="text" name="m_subject" class="large-text" required></p>
-                    <p><strong>Mesaj İçeriği:</strong><br><span style="font-size:12px; color:#666;">İpucu: Abonelikten çıkma linki için <code>{UNSUBSCRIBE_LINK}</code> yazın.</span></p>
+                    <p><strong>Mesaj İçeriği:</strong><br><span style="font-size:12px; color:#666;">İpucu: <code>{UNSUBSCRIBE_LINK}</code> eklemeyi unutmayın.</span></p>
                     <?php wp_editor('', 'm_body', array('textarea_rows'=>15)); ?>
                     <p><?php submit_button('Kampanyayı Başlat', 'primary', 'na_start_campaign', false); ?></p>
                 </form>
@@ -227,62 +244,29 @@ function na_page_sender_master() {
                 
                 <?php if($pending > 0): ?>
                     <p style="text-align:center;">⏳ <strong><?php echo $pending; ?></strong> beklemede...</p>
-                    <a href="?page=na-sender-master&clear_queue=1" class="button" style="color:red; width:100%; text-align:center;">Tüm Kuyruğu İptal Et</a>
+                    <a href="<?php echo wp_nonce_url('?page=na-sender-master&clear_queue=1', 'na_clear_all'); ?>" class="button" style="color:red; width:100%; text-align:center;">Tüm Kuyruğu İptal Et</a>
                 <?php endif; ?>
                 
-                <p style="text-align:center; margin-top:15px;">
-                    <a href="<?php echo admin_url('admin.php?page=wc-status&tab=action-scheduler&s=na_process_mail_action'); ?>" class="button button-secondary" target="_blank">⏱️ Zamanlanmış Eylemlere Git</a>
-                </p>
-
                 <hr>
-                
-                <h4>✅ Son Gönderilen 5 Mail (Anlık)</h4>
-                <ul style="font-size:12px; margin:0 0 15px 0; padding:0; list-style:none;">
-                    <?php if(empty($last_sent)): echo "<li style='color:#888;'>Henüz giden mail yok.</li>"; endif; ?>
+                <h4>✅ Son Gönderilenler</h4>
+                <ul style="font-size:12px; list-style:none; padding:0;">
                     <?php foreach($last_sent as $ls): ?>
-                        <li style="border-bottom:1px solid #e0e0e0; padding:4px 0; color:green;">✅ <?php echo esc_html($ls->target_email); ?></li>
+                        <li style="color:green; padding:2px 0;">✅ <?php echo esc_html($ls->target_email); ?></li>
                     <?php endforeach; ?>
                 </ul>
 
                 <h4>⏳ Sırada Bekleyenler</h4>
-                <ul style="font-size:12px; margin:0; padding:0; list-style:none;">
-                    <?php if(empty($next_pending)): echo "<li style='color:#888;'>Sırada bekleyen mail yok.</li>"; endif; ?>
+                <ul style="font-size:12px; list-style:none; padding:0;">
                     <?php foreach($next_pending as $np): ?>
-                        <li style="border-bottom:1px solid #e0e0e0; padding:4px 0; display:flex; justify-content:space-between;">
-                            <span style="color:#555;">⏳ <?php echo esc_html($np->target_email); ?></span>
-                            <a href="?page=na-sender-master&remove_queue_id=<?php echo $np->id; ?>" style="color:red; text-decoration:none;" title="Listeden Çıkart">Sil ✖</a>
+                        <li style="display:flex; justify-content:space-between; padding:2px 0; border-bottom:1px solid #eee;">
+                            <span>⏳ <?php echo esc_html($np->target_email); ?></span>
+                            <a href="<?php echo wp_nonce_url('?page=na-sender-master&remove_queue_id='.$np->id, 'na_remove_item'); ?>" style="color:red; text-decoration:none;">✖</a>
                         </li>
                     <?php endforeach; ?>
                 </ul>
             </div>
         </div>
-
-        <div style="background:#fff; padding:20px; border:1px solid #ccd0d4; border-radius:5px; margin-top:20px;">
-            <h3 style="margin-top:0;">🗓️ Son Gönderilen 5 Kampanya İçeriği</h3>
-            <table class="wp-list-table widefat fixed striped">
-                <thead>
-                    <tr>
-                        <th style="width:20%;">Tarih & Saat</th>
-                        <th style="width:20%;">Hedef Kitle</th>
-                        <th>Mail Konusu</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if(empty($campaign_history)): ?>
-                        <tr><td colspan="3" style="text-align:center; color:#888;">Henüz bir kampanya başlatılmadı.</td></tr>
-                    <?php else: ?>
-                        <?php foreach($campaign_history as $ch): ?>
-                            <tr>
-                                <td><strong><?php echo esc_html($ch['time']); ?></strong></td>
-                                <td><span style="background:#e1f5fe; color:#01579b; padding:4px 8px; border-radius:4px; font-size:12px;"><?php echo esc_html($ch['list']); ?></span></td>
-                                <td><?php echo esc_html($ch['subject']); ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
         </div>
-    </div>
     <?php
 }
 // =========================================================================
