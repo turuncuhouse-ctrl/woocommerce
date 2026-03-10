@@ -88,6 +88,18 @@ function na_custom_cache_bypass_cron() {
 // =========================================================================
 // BÖLÜM 4: GÖNDERİM MOTORU (ACTION SCHEDULER & BİLDİRİM)
 // =========================================================================
+
+add_action('wp_ajax_na_process_mail_action', 'na_domino_processor');
+function na_domino_processor() {
+    // GÜVENLİK ZIRHI: Sadece yönetici yetkisi olanlar bu işlemi tetikleyebilir!
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Bu işlem için yetkiniz yok!' );
+    }
+
+    global $wpdb;
+    // ... geri kalan gönderim kodları ...
+}
+
 add_action('na_process_mail_action', 'na_domino_processor');
 function na_domino_processor() {
     global $wpdb;
