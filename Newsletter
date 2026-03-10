@@ -5,14 +5,14 @@
  * Author: TB Bilişim Sistemleri
  * License: GPLv3 or later
  * License URI: https://www.gnu.org/licenses/gpl-3.0.html
- * Kurulum Talimati Önemli: Cron işlemi olarak bu linki eklemeniz gerekmektedir >>>>> https://siteadresiniz.com/?na_cron_tetikle=1
- * Hosting Yönetim panelinde yukarıdaki linki eklemeniz gerekmektedir veya cron-job.org adresinden ekleme yapmanız gerekmektedir.
+ * Kurulum Talimati Önemli: Cron işlemi olarak ayarlarda Cron Güvenlik Anahtarı kısmında cronda kullanılacak güvenlik anahtarınızı belirledikten sonra oluşan linki cron olarak ekleyebilirsiniz
+ * Hosting Yönetim paneline veya cron-job.org adresine oluşan şifreli linki ekleyerek kullanabilirsiniz.
  * Sistem 60 sn ye 1 mail atacak sekılde ayarlanmıştır ve paylaşımlı hostinglerde spama hiç bir şekilde takılmış kendi özel VPS-VDS serverından gonderım aralığını daha kısa tutabilirsiniz.
  * Wordpress menüsüne Aboneler adı altında menü ekler ve oradan yönetilir modüler bi yapıya sahiptir.
  * Code Snippets Eklentisi ile güvenle kullanabilirsiniz. veritabınınızda gereksiz Şişme yapmaz
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit; // Doğrudan erişimi engelle
+if ( ! defined( 'ABSPATH' ) ) exit;
 
 // =========================================================================
 // BÖLÜM 1: SİSTEM KURULUMU VE TABLOLAR
@@ -54,7 +54,7 @@ function na_master_engine_install() {
 }
 
 // =========================================================================
-// BÖLÜM 2: ADMİN MENÜLERİ (YETKİ: MANAGE_OPTIONS)
+// BÖLÜM 2: ADMİN MENÜLERİ
 // =========================================================================
 add_action('admin_menu', function() {
     add_menu_page('Abone Yönetimi', '📢 Aboneler', 'manage_options', 'na-subs-master', 'na_page_subscribers_master', 'dashicons-email-alt', 56);
@@ -63,19 +63,33 @@ add_action('admin_menu', function() {
 });
 
 // =========================================================================
-// BÖLÜM 3: GÖNDERİM MOTORU (GÜVENLİ)
+// BÖLÜM 3: GÜVENLİ DIŞ TETİKLEYİCİ (CRON)
 // =========================================================================
+add_action('wp_loaded', 'na_custom_secure_cron_trigger');
+function na_custom_secure_cron_trigger() {
+    $saved_key = get_option('na_cron_secret_key', 'tb_default_123');
 
-// AJAX Üzerinden Manuel Tetikleme (Güvenlik Kontrollü)
-add_action('wp_ajax_na_process_mail_action', 'na_safe_ajax_processor');
-function na_safe_ajax_processor() {
-    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error('Yetkisiz erişim!');
-    check_ajax_referer('na_newsletter_nonce', 'security');
-    na_domino_processor(); 
-    wp_send_json_success('Motor tetiklendi.');
+    if (isset($_GET['na_cron_tetikle']) && isset($_GET['key'])) {
+        if ($_GET['key'] === $saved_key) {
+            if (!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
+            nocache_headers();
+
+            if (class_exists('ActionScheduler_QueueRunner')) {
+                ActionScheduler_QueueRunner::instance()->run();
+            }
+
+            na_domino_processor();
+            echo "✅ Yetkili tetikleme basarili. Zaman: " . current_time('mysql');
+            exit;
+        } else {
+            wp_die('Erisim Engellendi: Hatali Guvenlik Anahtari.', '403 Forbidden', array('response' => 403));
+        }
+    }
 }
 
-// ANA MOTOR (Action Scheduler & Cron Burayı Kullanır)
+// =========================================================================
+// BÖLÜM 4: GÖNDERİM MOTORU
+// =========================================================================
 add_action('na_process_mail_action', 'na_domino_processor');
 function na_domino_processor() {
     global $wpdb;
@@ -108,7 +122,7 @@ function na_domino_processor() {
 }
 
 // =========================================================================
-// BÖLÜM 4: ADMİN EKRANI - MAIL GÖNDERİM (LİSTELER GERİ GELDİ)
+// BÖLÜM 5: ADMİN EKRANI - MAIL GÖNDERİM
 // =========================================================================
 function na_page_sender_master() {
     if ( ! current_user_can( 'manage_options' ) ) wp_die('Yetkisiz erişim.');
@@ -116,7 +130,6 @@ function na_page_sender_master() {
     $table = $wpdb->prefix . 'na_queue_master';
     $subs_table = $wpdb->prefix . 'na_subs_master';
 
-    // İşlem Kontrolleri (Nonce Zırhlı)
     if (isset($_GET['remove_queue_id'])) {
         check_admin_referer('na_remove_item');
         $wpdb->delete($table, array('id' => intval($_GET['remove_queue_id'])));
@@ -149,13 +162,11 @@ function na_page_sender_master() {
         echo '<div class="updated"><p>🚀 Kampanya güvenli bir şekilde başlatıldı!</p></div>';
     }
 
-    // VERİLERİ ÇEK
     $total_queue = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table");
     $pending = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status='pending'");
     $completed = $total_queue - $pending;
     $percent = ($total_queue > 0) ? round(($completed / $total_queue) * 100) : 0;
     
-    // LİSTELERİ ÇEK (EKSİK OLAN KISIM)
     $last_sent = $wpdb->get_results("SELECT * FROM $table WHERE status='sent' ORDER BY id DESC LIMIT 5");
     $next_pending = $wpdb->get_results("SELECT * FROM $table WHERE status='pending' ORDER BY id ASC LIMIT 5");
     ?>
@@ -165,42 +176,30 @@ function na_page_sender_master() {
             <div style="background:#fff; padding:20px; border:1px solid #ccd0d4; border-radius:5px;">
                 <form method="post">
                     <?php wp_nonce_field('na_start_action', 'na_campaign_nonce'); ?>
-                    <p><strong>Hedef Liste:</strong><br><select name="target_list" style="width:100%; max-width:200px;"><option value="main">Ana Liste</option><option value="test">Test Listesi</option></select></p>
+                    <p><strong>Hedef Liste:</strong><br><select name="target_list"><option value="main">Ana Liste</option><option value="test">Test Listesi</option></select></p>
                     <p><strong>Konu:</strong><br><input type="text" name="m_subject" class="large-text" required></p>
-                    <p><strong>Mesaj:</strong><br><span style="font-size:11px; color:#666;">İpucu: <code>{UNSUBSCRIBE_LINK}</code> eklemeyi unutmayın.</span></p>
                     <?php wp_editor('', 'm_body', array('textarea_rows'=>12)); ?>
                     <p><?php submit_button('Kampanyayı Başlat', 'primary', 'na_start_campaign', false); ?></p>
                 </form>
             </div>
-
             <div style="background:#f9f9f9; padding:20px; border:1px solid #ccd0d4; border-radius:5px;">
                 <h3>📊 Durum: %<?php echo $percent; ?></h3>
-                <div style="background:#e0e0e0; border-radius:10px; height:20px; margin-bottom:10px; overflow:hidden;">
-                    <div style="background:#4caf50; width:<?php echo $percent; ?>%; height:100%;"></div>
-                </div>
-                <p style="text-align:center;"><strong><?php echo $completed; ?> / <?php echo $total_queue; ?></strong> gönderildi.</p>
-
+                <div style="background:#e0e0e0; border-radius:10px; height:20px; overflow:hidden;"><div style="background:#4caf50; width:<?php echo $percent; ?>%; height:100%;"></div></div>
+                <p><strong><?php echo $completed; ?> / <?php echo $total_queue; ?></strong> gönderildi.</p>
                 <?php if($pending > 0): ?>
-                    <a href="<?php echo wp_nonce_url('?page=na-sender-master&clear_queue=1', 'na_clear_all'); ?>" class="button button-link-delete" style="width:100%; text-align:center; color:red; border:1px solid red; margin-bottom:20px;">⚠️ Kuyruğu Durdur ve Temizle</a>
+                    <a href="<?php echo wp_nonce_url('?page=na-sender-master&clear_queue=1', 'na_clear_all'); ?>" class="button" style="color:red; border:1px solid red; width:100%; text-align:center;">⚠️ Kuyruğu Temizle</a>
                 <?php endif; ?>
-
                 <hr>
-
                 <h4>✅ Son Gönderilen 5</h4>
-                <ul style="font-size:12px; list-style:none; padding:0; margin:0 0 20px 0;">
-                    <?php if(empty($last_sent)): echo "<li style='color:#888;'>Henüz gönderim yapılmadı.</li>"; endif; ?>
-                    <?php foreach($last_sent as $ls): ?>
-                        <li style="color:green; border-bottom:1px solid #eee; padding:4px 0;">✅ <?php echo esc_html($ls->target_email); ?></li>
-                    <?php endforeach; ?>
+                <ul style="font-size:12px; list-style:none; padding:0;">
+                    <?php if($last_sent) foreach($last_sent as $ls): echo "<li style='color:green;'>✅ ".esc_html($ls->target_email)."</li>"; endforeach; ?>
                 </ul>
-
                 <h4>⏳ Sırada Bekleyen 5</h4>
-                <ul style="font-size:12px; list-style:none; padding:0; margin:0;">
-                    <?php if(empty($next_pending)): echo "<li style='color:#888;'>Kuyruk boş.</li>"; endif; ?>
-                    <?php foreach($next_pending as $np): ?>
+                <ul style="font-size:12px; list-style:none; padding:0;">
+                    <?php if($next_pending) foreach($next_pending as $np): ?>
                         <li style="display:flex; justify-content:space-between; border-bottom:1px solid #eee; padding:4px 0;">
                             <span>⏳ <?php echo esc_html($np->target_email); ?></span>
-                            <a href="<?php echo wp_nonce_url('?page=na-sender-master&remove_queue_id='.$np->id, 'na_remove_item'); ?>" style="color:red; text-decoration:none;" title="Sil">✖</a>
+                            <a href="<?php echo wp_nonce_url('?page=na-sender-master&remove_queue_id='.$np->id, 'na_remove_item'); ?>" style="color:red;">✖</a>
                         </li>
                     <?php endforeach; ?>
                 </ul>
@@ -211,21 +210,19 @@ function na_page_sender_master() {
 }
 
 // =========================================================================
-// BÖLÜM 5: ABONE YÖNETİMİ (YETKİ KONTROLLÜ)
+// BÖLÜM 6: ABONE YÖNETİMİ
 // =========================================================================
 function na_page_subscribers_master() {
     if ( ! current_user_can( 'manage_options' ) ) wp_die('Yetkisiz erişim.');
     global $wpdb;
     $table = $wpdb->prefix . 'na_subs_master';
 
-    // Tekli Silme
     if (isset($_GET['delete_sub'])) {
         check_admin_referer('na_delete_sub_' . $_GET['delete_sub']);
         $wpdb->delete($table, array('id' => intval($_GET['delete_sub'])));
         echo '<div class="updated"><p>Abone silindi.</p></div>';
     }
 
-    // Toplu Silme
     if (isset($_POST['bulk_delete_action'])) {
         check_admin_referer('na_bulk_subs', 'na_bulk_nonce');
         if(!empty($_POST['sub_ids'])) {
@@ -235,16 +232,13 @@ function na_page_subscribers_master() {
         }
     }
 
-    // İçe Aktarma
     if (isset($_POST['na_import_emails'])) {
         check_admin_referer('na_import_action', 'na_import_nonce');
         $raw_emails = explode("\n", $_POST['import_data']);
         $list_type = sanitize_text_field($_POST['import_list_type']);
         foreach($raw_emails as $e) {
             $e = sanitize_email(trim($e));
-            if (is_email($e)) {
-                $wpdb->replace($table, array('email' => $e, 'list_type' => $list_type, 'status' => 'active'));
-            }
+            if (is_email($e)) $wpdb->replace($table, array('email' => $e, 'list_type' => $list_type, 'status' => 'active'));
         }
         echo "<div class='updated'><p>Liste güncellendi.</p></div>";
     }
@@ -261,13 +255,12 @@ function na_page_subscribers_master() {
                 <button type="submit" name="na_import_emails" class="button">İçe Aktar</button>
             </form>
         </div>
-
         <form method="post">
             <?php wp_nonce_field('na_bulk_subs', 'na_bulk_nonce'); ?>
             <table class="wp-list-table widefat fixed striped">
                 <thead><tr><th style="width:30px;"><input type="checkbox"></th><th>Email</th><th>Liste</th><th>İşlem</th></tr></thead>
                 <tbody>
-                    <?php foreach($subs as $s): ?>
+                    <?php if($subs) foreach($subs as $s): ?>
                     <tr>
                         <td><input type="checkbox" name="sub_ids[]" value="<?php echo $s->id; ?>"></td>
                         <td><?php echo esc_html($s->email); ?></td>
@@ -277,38 +270,55 @@ function na_page_subscribers_master() {
                     <?php endforeach; ?>
                 </tbody>
             </table>
-            <p><input type="submit" name="bulk_delete_action" class="button action" value="Seçilenleri Sil" onclick="return confirm('Emin misiniz?');"></p>
+            <p><input type="submit" name="bulk_delete_action" class="button action" value="Seçilenleri Sil"></p>
         </form>
     </div>
     <?php
 }
 
 // =========================================================================
-// BÖLÜM 6: AYARLAR VE GÜVENLİK
+// BÖLÜM 7: AYARLAR VE GÜVENLİK ANAHTARI (KESİN KAYIT)
 // =========================================================================
 function na_page_settings_master() {
     if ( ! current_user_can( 'manage_options' ) ) wp_die('Yetkisiz erişim.');
-    if(isset($_POST['save_na'])) {
+    
+    if (isset($_POST['save_na'])) {
         check_admin_referer('na_settings_action', 'na_settings_nonce');
         update_option('na_send_interval', intval($_POST['interval']));
         update_option('na_kvkk_text', wp_unslash($_POST['kvkk']));
-        echo '<div class="updated"><p>Kaydedildi.</p></div>';
+        
+        $new_key = sanitize_text_field(trim($_POST['cron_key']));
+        if(!empty($new_key)) {
+            update_option('na_cron_secret_key', $new_key);
+        }
+        
+        echo '<div class="updated"><p>✅ Ayarlar başarıyla güncellendi!</p></div>';
     }
+    
+    $current_key = get_option('na_cron_secret_key', 'tb_default_123');
     ?>
     <div class="wrap">
-        <h1>⚙️ Ayarlar</h1>
-        <form method="post">
+        <h1>⚙️ Sistem Ayarları</h1>
+        <form method="post" style="background:#fff; padding:20px; border:1px solid #ccd0d4; border-radius:5px; max-width:800px;">
             <?php wp_nonce_field('na_settings_action', 'na_settings_nonce'); ?>
+            <h3>🛡️ Cron Güvenlik Anahtarı</h3>
+            <p>Anahtarınızı aşağıdan değiştirin:</p>
+            <input name="cron_key" type="text" value="<?php echo esc_attr($current_key); ?>" class="regular-text" style="font-family:monospace;">
+            <p style="background:#f0f0f0; padding:10px; border-left:4px solid #2271b1;">
+                <strong>Yeni Cron Linkiniz:</strong><br>
+                <code><?php echo site_url(); ?>/?na_cron_tetikle=1&key=<?php echo esc_html($current_key); ?></code>
+            </p>
+            <hr>
             <p>Bekleme Süresi (sn): <input name="interval" type="number" value="<?php echo get_option('na_send_interval', 60); ?>"></p>
-            <p>KVKK Metni: <textarea name="kvkk" class="large-text"><?php echo esc_textarea(get_option('na_kvkk_text')); ?></textarea></p>
-            <?php submit_button(); ?>
+            <p>KVKK Metni:<br><textarea name="kvkk" class="large-text" rows="5"><?php echo esc_textarea(get_option('na_kvkk_text')); ?></textarea></p>
+            <?php submit_button('Ayarları Kaydet', 'primary', 'save_na'); ?>
         </form>
     </div>
     <?php
 }
 
 // =========================================================================
-// BÖLÜM 7: ABONELİKTEN ÇIKIŞ 
+// BÖLÜM 8: ABONELİKTEN ÇIKIŞ
 // =========================================================================
 add_action('init', 'na_unsubscribe_master_listener');
 function na_unsubscribe_master_listener() {
