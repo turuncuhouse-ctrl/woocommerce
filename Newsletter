@@ -63,7 +63,7 @@ add_action('admin_menu', function() {
 });
 
 // =========================================================================
-// BÖLÜM 3: GÖNDERİM MOTORU (GÜVENLİ VE ZIRHLI)
+// BÖLÜM 3: GÖNDERİM MOTORU (GÜVENLİ)
 // =========================================================================
 
 // AJAX Üzerinden Manuel Tetikleme (Güvenlik Kontrollü)
@@ -211,7 +211,7 @@ function na_page_sender_master() {
 }
 
 // =========================================================================
-// BÖLÜM 5: ABONE YÖNETİMİ (NONCE VE YETKİ KONTROLLÜ)
+// BÖLÜM 5: ABONE YÖNETİMİ (YETKİ KONTROLLÜ)
 // =========================================================================
 function na_page_subscribers_master() {
     if ( ! current_user_can( 'manage_options' ) ) wp_die('Yetkisiz erişim.');
@@ -308,7 +308,7 @@ function na_page_settings_master() {
 }
 
 // =========================================================================
-// BÖLÜM 7: ABONELİKTEN ÇIKIŞ (DIŞ DÜNYA İÇİN GÜVENLİ HASH)
+// BÖLÜM 7: ABONELİKTEN ÇIKIŞ 
 // =========================================================================
 add_action('init', 'na_unsubscribe_master_listener');
 function na_unsubscribe_master_listener() {
