@@ -1,0 +1,317 @@
+<?php
+/**
+ * Ticaret Motoru V4.1
+ * Özellikler: ROL YÖNETİMİ, NET FİYAT, KATEGORİ İNDİRİMİ, KISITLAMALAR.
+ * Güvenlik: Nonce kontrolü, Kritik rol koruması ve Yetki doğrulama eklendi.
+ * Kurulum için wordpress panelinizden Code Snippets Eklentisini kurarak kullanım sağlayabilirsiniz.
+ */
+
+/* ==========================================================================
+   1. SİSTEM BAŞLATMA
+   ========================================================================== */
+add_action('init', 'tb_v4_secure_init');
+function tb_v4_secure_init() {
+    if (!get_option('tb_dropshipper_installed')) {
+        if (!get_role('dropshipper')) {
+            add_role('dropshipper', 'Dropshipper', array('read' => true, 'edit_posts' => false));
+        }
+        update_option('tb_dropshipper_installed', 1);
+    }
+}
+
+/* ==========================================================================
+   2. ÜRÜN İÇİ NET FİYAT ALANLARI VE KAYIT (GÜVENLİ)
+   ========================================================================== */
+add_action('woocommerce_product_options_general_product_data', 'tb_v4_product_fields');
+function tb_v4_product_fields() {
+    global $wp_roles;
+    echo '<div class="options_group" style="background:#f9f9f9; padding:10px; border:1px solid #ddd;">';
+    echo '<h3>💎 Role Özel Net Fiyatlar</h3><p class="description">Buraya fiyat girerseniz kategori indirimleri geçersiz sayılır.</p>';
+    
+    foreach ($wp_roles->roles as $key => $info) {
+        if (in_array($key, array('administrator', 'customer', 'subscriber'))) continue;
+        woocommerce_wp_text_input(array(
+            'id' => '_tb_price_' . $key,
+            'label' => $info['name'] . ' Fiyatı (TL)',
+            'placeholder' => 'Örn: 100.50',
+            'type' => 'text',
+            'desc_tip' => 'true'
+        ));
+    }
+    echo '</div>';
+}
+
+add_action('woocommerce_process_product_meta', 'tb_v4_save_product_secure');
+function tb_v4_save_product_secure($post_id) {
+    if (!current_user_can('edit_products')) return; // Yetki Kontrolü
+
+    global $wp_roles;
+    foreach ($wp_roles->roles as $key => $info) {
+        if (isset($_POST['_tb_price_' . $key])) {
+            $price_val = sanitize_text_field($_POST['_tb_price_' . $key]);
+            $price_val = str_replace(',', '.', $price_val); // Virgülü noktaya çevir
+            
+            if ($price_val === '') {
+                delete_post_meta($post_id, '_tb_price_' . $key);
+            } else {
+                update_post_meta($post_id, '_tb_price_' . $key, esc_attr($price_val));
+            }
+        }
+    }
+}
+
+/* ==========================================================================
+   3. ADMİN PANELİ (NONCE KORUMALI)
+   ========================================================================== */
+add_action('admin_menu', 'tb_v4_menu');
+function tb_v4_menu() {
+    add_menu_page('TB Engine', 'TB Engine', 'manage_options', 'tb-engine-v4', 'tb_v4_page_secure', 'dashicons-shield', 58);
+}
+
+function tb_v4_page_secure() {
+    if (!current_user_can('manage_options')) wp_die('Yetkisiz erişim.');
+    global $wp_roles;
+
+    // A) ROL İŞLEMLERİ (NONCE KONTROLÜ)
+    if (isset($_POST['tb_role_action_nonce'])) {
+        if (!wp_verify_nonce($_POST['tb_role_action_nonce'], 'tb_role_action')) {
+            wp_die('Güvenlik doğrulaması başarısız.');
+        }
+
+        if ($_POST['tb_action_type'] == 'add') {
+            $new_name = sanitize_text_field($_POST['new_role_name']);
+            $new_slug = sanitize_title($new_name);
+            if ($new_slug && !get_role($new_slug)) {
+                add_role($new_slug, $new_name, array('read' => true));
+                echo '<div class="updated"><p>✅ Rol Eklendi: '.$new_name.'</p></div>';
+            }
+        } elseif ($_POST['tb_action_type'] == 'delete') {
+            $del_slug = sanitize_text_field($_POST['delete_role_slug']);
+            // KRİTİK ROLLERİ KORU
+            $protected = array('administrator', 'customer', 'subscriber', 'shop_manager', 'editor', 'author');
+            if (!in_array($del_slug, $protected)) {
+                remove_role($del_slug);
+                echo '<div class="updated"><p>🗑️ Rol Silindi: '.$del_slug.'</p></div>';
+            } else {
+                echo '<div class="error"><p>⛔ Kritik sistem rolleri silinemez!</p></div>';
+            }
+        }
+        $wp_roles = new WP_Roles();
+    }
+
+    // B) AYARLARI KAYDETME (NONCE KONTROLÜ)
+    if (isset($_POST['tb_save_v4'])) {
+        check_admin_referer('tb_v4_save_action', 'tb_v4_nonce');
+        
+        $config = isset($_POST['roles_config']) ? $_POST['roles_config'] : array();
+        update_option('tb_engine_v4_settings', array('roles_config' => $config));
+        
+        WC_Cache_Helper::get_transient_version('shipping', true);
+        echo '<div class="updated"><p><strong>✅ Ayarlar Güvenli Bir Şekilde Güncellendi!</strong></p></div>';
+    }
+
+    $data = get_option('tb_engine_v4_settings', array());
+    $active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'roles';
+    $gateways = WC()->payment_gateways->payment_gateways();
+    $shipping_methods = WC()->shipping->get_shipping_methods();
+    $categories = get_terms(array('taxonomy' => 'product_cat', 'hide_empty' => false));
+    ?>
+    <div class="wrap">
+        <h1>🚀 TB Engine V4.1 <small>(Güvenli Mod)</small></h1>
+        <h2 class="nav-tab-wrapper">
+            <a href="?page=tb-engine-v4&tab=roles" class="nav-tab <?php echo $active_tab == 'roles' ? 'nav-tab-active' : ''; ?>">Roller & Kısıtlamalar</a>
+            <a href="?page=tb-engine-v4&tab=discounts" class="nav-tab <?php echo $active_tab == 'discounts' ? 'nav-tab-active' : ''; ?>">Kategori İndirimleri</a>
+        </h2>
+
+        <?php if ($active_tab == 'roles'): ?>
+            <div style="background:#fff; padding:20px; border:1px solid #ccd0d4; margin-top:20px;">
+                <h3>Rol Yönetimi</h3>
+                <form method="post" style="display:flex; gap:10px; align-items:center;">
+                    <?php wp_nonce_field('tb_role_action', 'tb_role_action_nonce'); ?>
+                    <input type="hidden" name="tb_action_type" value="add">
+                    <input type="text" name="new_role_name" placeholder="Yeni Rol Adı (Örn: Alt Bayi)" required>
+                    <input type="submit" class="button button-primary" value="Yeni Rol Ekle">
+                </form>
+                <br>
+                <div style="display:flex; flex-wrap:wrap; gap:10px;">
+                    <?php foreach ($wp_roles->roles as $rk => $ri): ?>
+                        <div style="background:#f1f1f1; border:1px solid #ccc; padding:5px 12px; border-radius:4px; display:flex; align-items:center;">
+                            <strong><?php echo $ri['name']; ?></strong>
+                            <?php if(!in_array($rk, array('administrator', 'customer', 'subscriber', 'shop_manager'))): ?>
+                                <form method="post" style="margin-left:10px;" onsubmit="return confirm('Bu rolü silmek istediğinize emin misiniz?');">
+                                    <?php wp_nonce_field('tb_role_action', 'tb_role_action_nonce'); ?>
+                                    <input type="hidden" name="tb_action_type" value="delete">
+                                    <input type="hidden" name="delete_role_slug" value="<?php echo $rk; ?>">
+                                    <button type="submit" style="color:red; border:none; background:none; cursor:pointer; font-weight:bold;">×</button>
+                                </form>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+
+            <form method="post" style="margin-top:20px;">
+                <?php wp_nonce_field('tb_v4_save_action', 'tb_v4_nonce'); ?>
+                <table class="widefat fixed striped">
+                    <thead><tr><th>Rol</th><th>Kupon</th><th>Kargo İzinleri</th><th>Ödeme İzinleri</th></tr></thead>
+                    <tbody>
+                        <?php foreach ($wp_roles->roles as $rk => $ri): if ($rk == 'administrator') continue;
+                            $rc = isset($data['roles_config'][$rk]) ? $data['roles_config'][$rk] : array(); ?>
+                        <tr>
+                            <td><strong><?php echo $ri['name']; ?></strong></td>
+                            <td><input type="checkbox" name="roles_config[<?php echo $rk; ?>][allow_coupon]" value="1" <?php checked(isset($rc['allow_coupon']) ? $rc['allow_coupon'] : 0, 1); ?>></td>
+                            <td><?php foreach ($shipping_methods as $mid => $m): ?>
+                                <label style="display:block;"><input type="checkbox" name="roles_config[<?php echo $rk; ?>][shipping][]" value="<?php echo $mid; ?>" <?php echo (isset($rc['shipping']) && in_array($mid, $rc['shipping'])) ? 'checked' : ''; ?>> <?php echo $m->method_title; ?></label>
+                            <?php endforeach; ?></td>
+                            <td><?php foreach ($gateways as $gid => $g): if('yes'!==$g->enabled) continue; ?>
+                                <label style="display:block;"><input type="checkbox" name="roles_config[<?php echo $rk; ?>][payment][]" value="<?php echo $gid; ?>" <?php echo (isset($rc['payment']) && in_array($gid, $rc['payment'])) ? 'checked' : ''; ?>> <?php echo $g->title; ?></label>
+                            <?php endforeach; ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <p class="submit"><input type="submit" name="tb_save_v4" class="button-primary button-large" value="Kısıtlamaları Kaydet"></p>
+            </form>
+
+        <?php elseif ($active_tab == 'discounts'): ?>
+            <form method="post">
+                <?php wp_nonce_field('tb_v4_save_action', 'tb_v4_nonce'); ?>
+                <div style="background:#fff; padding:20px; border:1px solid #ccc; margin-top:20px;">
+                    <h3>Kategori Bazlı İndirim Oranları (%)</h3>
+                    <?php foreach ($wp_roles->roles as $rk => $ri): if (in_array($rk, array('administrator', 'customer'))) continue; ?>
+                        <div style="margin-bottom:30px; border:1px solid #eee; padding:15px; border-radius:5px;">
+                            <h4 style="margin-top:0; color:#2271b1; border-bottom:2px solid #2271b1; display:inline-block;"><?php echo $ri['name']; ?> Grubu</h4>
+                            <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:15px; margin-top:10px;">
+                                <?php foreach ($categories as $cat): 
+                                    $val = isset($data['roles_config'][$rk]['cat_disc'][$cat->term_id]) ? $data['roles_config'][$rk]['cat_disc'][$cat->term_id] : ''; ?>
+                                    <div style="background:#f9f9f9; padding:8px; border-radius:3px;">
+                                        <label style="font-weight:600; font-size:12px;"><?php echo $cat->name; ?></label><br>
+                                        <input type="number" step="0.01" name="roles_config[<?php echo $rk; ?>][cat_disc][<?php echo $cat->term_id; ?>]" value="<?php echo esc_attr($val); ?>" style="width:70px;"> %
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+                <p class="submit"><input type="submit" name="tb_save_v4" class="button-primary button-large" value="İndirimleri Kaydet"></p>
+            </form>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+/* ==========================================================================
+   4. FİYAT MOTORU (STABİL)
+   ========================================================================== */
+add_filter('woocommerce_product_get_price', 'tb_v4_price_engine', 99, 2);
+add_filter('woocommerce_product_variation_get_price', 'tb_v4_price_engine', 99, 2);
+
+function tb_v4_price_engine($price, $product) {
+    if (is_admin() && !defined('DOING_AJAX')) return $price;
+    if (!is_user_logged_in()) return $price;
+
+    $user = wp_get_current_user();
+    $data = get_option('tb_engine_v4_settings', array());
+    $best_price = $price; 
+    $found = false;
+
+    foreach ((array)$user->roles as $role) {
+        // 1. Net Fiyat Kontrolü
+        $net_price = get_post_meta($product->get_id(), '_tb_price_' . $role, true);
+        if (!empty($net_price) && is_numeric($net_price)) {
+            if ($net_price < $best_price) { 
+                $best_price = $net_price; 
+                $found = true; 
+            }
+            continue; // Net fiyat varsa indirim hesaplama
+        }
+
+        // 2. Kategori İndirimi Kontrolü
+        if (isset($data['roles_config'][$role]['cat_disc'])) {
+            $discs = $data['roles_config'][$role]['cat_disc'];
+            foreach ($product->get_category_ids() as $cid) {
+                if (!empty($discs[$cid]) && $discs[$cid] > 0) {
+                    $discounted = $price - ($price * (floatval($discs[$cid]) / 100));
+                    if ($discounted < $best_price) {
+                        $best_price = $discounted;
+                        $found = true;
+                    }
+                }
+            }
+        }
+    }
+    return $found ? $best_price : $price;
+}
+
+/* ==========================================================================
+   5. KISITLAMALAR (KARGO, ÖDEME, KUPON)
+   ========================================================================== */
+add_filter('woocommerce_package_rates', 'tb_v4_secure_shipping', 100, 2);
+function tb_v4_secure_shipping($rates, $package) {
+    if (!is_user_logged_in()) return $rates;
+    $user = wp_get_current_user();
+    $data = get_option('tb_engine_v4_settings', array());
+    
+    $allowed_methods = array(); 
+    $has_restriction = false;
+
+    foreach((array)$user->roles as $r) {
+        if (isset($data['roles_config'][$r]['shipping']) && !empty($data['roles_config'][$r]['shipping'])) {
+            $allowed_methods = array_merge($allowed_methods, $data['roles_config'][$r]['shipping']);
+            $has_restriction = true;
+        }
+    }
+
+    if (!$has_restriction) return $rates;
+
+    foreach ($rates as $id => $rate) {
+        $is_allowed = false;
+        foreach($allowed_methods as $allowed_id) {
+            if (strpos($id, $allowed_id) !== false) {
+                $is_allowed = true;
+                break;
+            }
+        }
+        if (!$is_allowed) unset($rates[$id]);
+    }
+    return $rates;
+}
+
+add_filter('woocommerce_available_payment_gateways', 'tb_v4_secure_payment');
+function tb_v4_secure_payment($gateways) {
+    if (!is_user_logged_in() || is_admin()) return $gateways;
+    $user = wp_get_current_user();
+    $data = get_option('tb_engine_v4_settings', array());
+    
+    $allowed_gateways = array();
+    $has_restriction = false;
+
+    foreach((array)$user->roles as $r) {
+        if (isset($data['roles_config'][$r]['payment']) && !empty($data['roles_config'][$r]['payment'])) {
+            $allowed_gateways = array_merge($allowed_gateways, $data['roles_config'][$r]['payment']);
+            $has_restriction = true;
+        }
+    }
+
+    if (!$has_restriction) return $gateways;
+
+    foreach ($gateways as $id => $gateway) {
+        if (!in_array($id, $allowed_gateways)) unset($gateways[$id]);
+    }
+    return $gateways;
+}
+
+add_filter('woocommerce_coupon_is_valid', 'tb_v4_secure_coupon', 10, 2);
+function tb_v4_secure_coupon($valid, $coupon) {
+    if (!is_user_logged_in()) return $valid;
+    $user = wp_get_current_user();
+    $data = get_option('tb_engine_v4_settings', array());
+    
+    foreach((array)$user->roles as $r) {
+        // Eğer rolde kupon izni kapalıysa geçersiz say
+        if (isset($data['roles_config'][$r]) && empty($data['roles_config'][$r]['allow_coupon'])) {
+            return false;
+        }
+    }
+    return $valid;
+}
